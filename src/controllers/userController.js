@@ -1,7 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
-const uploadToSupabase = require("../utils/uploadToSupabase"); // <-- Import helper Supabase
+const uploadToSupabase = require("../utils/uploadToSupabase"); // Helper Supabase
 
 // Helper generate JWT user
 const generateToken = (user) => {
@@ -208,6 +208,8 @@ const deleteAccount = async (req, res) => {
       return res.status(404).json({ success: false, message: "User tidak ditemukan" });
     }
 
+    // Catatan: Jika diperlukan hapus asset di Supabase Storage, dapat dieksekusi di sini secara async
+
     return res.status(200).json({
       success: true,
       message: "Akun berhasil dihapus",
@@ -239,6 +241,7 @@ const getPaymentHistory = async (req, res) => {
     );
     return res.status(200).json({ success: true, data: result.rows });
   } catch (err) {
+    console.error("Get payment history error:", err.message); // Ditambahkan log error
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
@@ -249,13 +252,24 @@ const getPaymentHistory = async (req, res) => {
 const hidePayment = async (req, res) => {
   const userId = req.user.id;
   const paymentId = parseInt(req.params.id);
+
+  if (isNaN(paymentId)) {
+    return res.status(400).json({ success: false, message: "ID transaksi tidak valid" });
+  }
+
   try {
-    await pool.query(
-      `UPDATE payment_transaction SET hidden_at = NOW() WHERE id = $1 AND user_id = $2`,
+    const result = await pool.query(
+      `UPDATE payment_transaction SET hidden_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING id`,
       [paymentId, userId]
     );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Transaksi tidak ditemukan atau bukan milik Anda" });
+    }
+
     return res.status(200).json({ success: true, message: "Berhasil dihapus" });
   } catch (err) {
+    console.error("Hide payment error:", err.message);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };

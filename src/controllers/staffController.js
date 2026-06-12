@@ -1,26 +1,19 @@
 const pool = require("../config/db");
-const uploadToSupabase = require("../utils/uploadToSupabase"); // <-- Import helper Supabase
+const uploadToSupabase = require("../utils/uploadToSupabase"); 
 const { softDeleteSchedulesByCondition } = require("../utils/scheduleCleanup");
-
-const getBranchId = (req, res) => {
-  const branchId = req.admin.branch_id;
-  if (!branchId) {
-    res.status(403).json({
-      success: false,
-      message: "Admin belum terhubung ke cabang manapun",
-    });
-    return null;
-  }
-  return branchId;
-};
 
 /**
  * GET /api/staff
  * Ambil semua staff milik branch admin yang login
  */
 const getAllStaff = async (req, res) => {
-  const branchId = getBranchId(req, res);
-  if (!branchId) return;
+  const branchId = req.admin?.branch_id;
+  if (!branchId) {
+    return res.status(403).json({
+      success: false,
+      message: "Admin belum terhubung ke cabang manapun",
+    });
+  }
 
   try {
     const result = await pool.query(
@@ -43,11 +36,16 @@ const getAllStaff = async (req, res) => {
 
 /**
  * POST /api/staff
- * Tambah staff baru (Upload gambar langsung ke Supabase Storage)
+ * Tambah staff baru
  */
 const createStaff = async (req, res) => {
-  const branchId = getBranchId(req, res);
-  if (!branchId) return;
+  const branchId = req.admin?.branch_id;
+  if (!branchId) {
+    return res.status(403).json({
+      success: false,
+      message: "Admin belum terhubung ke cabang manapun",
+    });
+  }
 
   const { name, contact, description } = req.body;
 
@@ -74,7 +72,7 @@ const createStaff = async (req, res) => {
         branchId,
         name.trim(),
         contact?.trim() || null,
-        imageUrl, // Menyimpan URL publik Supabase (atau null jika tidak ada gambar)
+        imageUrl,
         description?.trim() || null,
       ]
     );
@@ -95,8 +93,13 @@ const createStaff = async (req, res) => {
  * Edit data staff
  */
 const updateStaff = async (req, res) => {
-  const branchId = getBranchId(req, res);
-  if (!branchId) return;
+  const branchId = req.admin?.branch_id;
+  if (!branchId) {
+    return res.status(403).json({
+      success: false,
+      message: "Admin belum terhubung ke cabang manapun",
+    });
+  }
 
   const staffId = parseInt(req.params.id);
   const { name, contact, description } = req.body;
@@ -119,7 +122,7 @@ const updateStaff = async (req, res) => {
     if (current.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: "Staff tidak ditemukan",
+        message: "Staff tidak ditemukan atau bukan milik cabang Anda",
       });
     }
 
@@ -129,10 +132,6 @@ const updateStaff = async (req, res) => {
     // Jika admin mengunggah file baru, simpan file baru ke Supabase
     if (req.file) {
       newImage = await uploadToSupabase(req.file, "staffs");
-      
-      // CATATAN TAMBAHAN:
-      // Di arsitektur Serverless Vercel, kita umumnya membiarkan file lama di Supabase Storage
-      // agar response time tetap cepat, namun tautan di database PostgreSQL sudah sukses terperbarui.
     }
 
     const result = await pool.query(
@@ -166,10 +165,18 @@ const updateStaff = async (req, res) => {
  * Hapus staff beserta soft-delete jadwal terkait
  */
 const deleteStaff = async (req, res) => {
-  const branchId = getBranchId(req, res);
-  if (!branchId) return;
+  const branchId = req.admin?.branch_id;
+  if (!branchId) {
+    return res.status(403).json({
+      success: false,
+      message: "Admin belum terhubung ke cabang manapun",
+    });
+  }
+
   const staffId = parseInt(req.params.id);
-  if (isNaN(staffId)) return res.status(400).json({ success: false, message: "ID tidak valid" });
+  if (isNaN(staffId)) {
+    return res.status(400).json({ success: false, message: "ID tidak valid" });
+  }
 
   try {
     const client = await pool.connect();
@@ -182,7 +189,7 @@ const deleteStaff = async (req, res) => {
       );
       if (check.rows.length === 0) {
         await client.query("ROLLBACK");
-        return res.status(404).json({ success: false, message: "Staff tidak ditemukan" });
+        return res.status(404).json({ success: false, message: "Staff tidak ditemukan atau bukan milik cabang Anda" });
       }
 
       // Soft-delete semua schedule yang menggunakan staff ini

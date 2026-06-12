@@ -1,7 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
-const uploadToSupabase = require("../utils/uploadToSupabase"); // Helper Supabase
+const uploadToSupabase = require("../utils/uploadToSupabase");
 
 // Helper generate JWT user
 const generateToken = (user) => {
@@ -38,13 +38,19 @@ const register = async (req, res) => {
       });
     }
 
+    // Proses upload foto profil JIKA user melampirkan foto saat registrasi
+    let photoUrl = null;
+    if (req.file) {
+      photoUrl = await uploadToSupabase(req.file, "users");
+    }
+
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
     // Insert user baru
     const result = await pool.query(
-      `INSERT INTO app_user (name, email, password, phone, gender)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO app_user (name, email, password, phone, gender, photo)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, name, email, phone, gender, photo, created_at`,
       [
         name.trim(),
@@ -52,6 +58,7 @@ const register = async (req, res) => {
         hashedPassword,
         phone?.trim() || null,
         gender || null,
+        photoUrl // Menyimpan null atau URL dari Supabase
       ]
     );
 
@@ -171,11 +178,14 @@ const updateProfile = async (req, res) => {
     }
 
     const oldPhoto = current.rows[0].photo;
-    let newPhoto = oldPhoto;
+    let newPhotoUrl = oldPhoto; // Set default ke foto lama
 
-    // Jika user mengunggah file foto baru, upload langsung ke Supabase Storage
+    // Pengecekan Aman: Jika user mengunggah file foto baru, baru jalankan Supabase
     if (req.file) {
-      newPhoto = await uploadToSupabase(req.file, "users");
+      const uploadedUrl = await uploadToSupabase(req.file, "users");
+      if (uploadedUrl) {
+        newPhotoUrl = uploadedUrl;
+      }
     }
 
     const result = await pool.query(
@@ -183,7 +193,7 @@ const updateProfile = async (req, res) => {
        SET name = $1, phone = $2, gender = $3, photo = $4, updated_at = NOW()
        WHERE id = $5
        RETURNING id, name, email, phone, gender, photo`,
-      [name.trim(), phone?.trim() || null, gender || null, newPhoto, req.user.id]
+      [name.trim(), phone?.trim() || null, gender || null, newPhotoUrl, req.user.id]
     );
 
     return res.status(200).json({
@@ -208,8 +218,6 @@ const deleteAccount = async (req, res) => {
       return res.status(404).json({ success: false, message: "User tidak ditemukan" });
     }
 
-    // Catatan: Jika diperlukan hapus asset di Supabase Storage, dapat dieksekusi di sini secara async
-
     return res.status(200).json({
       success: true,
       message: "Akun berhasil dihapus",
@@ -220,9 +228,6 @@ const deleteAccount = async (req, res) => {
   }
 };
 
-/**
- * GET /api/users/payments
- */
 const getPaymentHistory = async (req, res) => {
   const userId = req.user.id;
   try {
@@ -241,14 +246,11 @@ const getPaymentHistory = async (req, res) => {
     );
     return res.status(200).json({ success: true, data: result.rows });
   } catch (err) {
-    console.error("Get payment history error:", err.message); // Ditambahkan log error
+    console.error("Get payment history error:", err.message);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
-/**
- * POST /api/users/payments/:id/hide
- */
 const hidePayment = async (req, res) => {
   const userId = req.user.id;
   const paymentId = parseInt(req.params.id);

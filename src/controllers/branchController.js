@@ -1,5 +1,6 @@
 const pool = require("../config/db");
 const bcrypt = require("bcryptjs");
+const uploadToSupabase = require("../utils/uploadToSupabase"); // <-- Import helper Supabase
 
 /**
  * GET /api/branches
@@ -13,20 +14,21 @@ const getAllBranches = async (req, res) => {
 
     const result = await pool.query(
       `SELECT 
-         b.id,
-         b.name,
-         b.address,
-         b.contact,
-         b.operational_hours,
-         b.time_slots,
-         b.created_at,
-         -- Hitung jumlah admin yang terhubung ke branch ini
-         COUNT(a.id) AS admin_count
-       FROM branch b
-       LEFT JOIN admin a ON a.branch_id = b.id
-       WHERE b.id != $1
-       GROUP BY b.id
-       ORDER BY b.created_at ASC`,
+          b.id,
+          b.name,
+          b.address,
+          b.contact,
+          b.operational_hours,
+          b.time_slots,
+          b.photo, -- <-- Kita ambil juga kolom photo agar bisa ditampilkan di Frontend
+          b.created_at,
+          -- Hitung jumlah admin yang terhubung ke branch ini
+          COUNT(a.id) AS admin_count
+        FROM branch b
+        LEFT JOIN admin a ON a.branch_id = b.id
+        WHERE b.id != $1
+        GROUP BY b.id
+        ORDER BY b.created_at ASC`,
       [myBranchId]
     );
 
@@ -53,14 +55,7 @@ const getAllBranches = async (req, res) => {
 
 /**
  * POST /api/branches
- * Tambah cabang baru + buat akun admin cabang sekaligus
- * 
- * Body:
- * {
- *   branch_name, branch_address, branch_contact,
- *   operational_hours, time_slots,
- *   admin_email, admin_password, admin_phone, admin_role
- * }
+ * Tambah cabang baru + buat akun admin cabang sekaligus (Termasuk Upload Foto ke Supabase)
  */
 const createBranch = async (req, res) => {
   const {
@@ -107,8 +102,7 @@ const createBranch = async (req, res) => {
   if (!passwordRegex.test(admin_password)) {
     return res.status(400).json({
       success: false,
-      message:
-        "Password admin minimal 8 karakter, harus ada huruf besar, huruf kecil, dan angka",
+      message: "Password admin minimal 8 karakter, harus ada huruf besar, huruf kecil, dan angka",
     });
   }
 
@@ -131,19 +125,24 @@ const createBranch = async (req, res) => {
       });
     }
 
-    // ─── 2. Insert branch baru ────────────────────────────────
+    // ─── 2. Proses Upload Gambar ke Supabase (Jika Ada) ────────
+    let photoUrl = null;
+    if (req.file) {
+      // Menggunakan helper untuk upload buffer ke folder 'branches' di Supabase
+      photoUrl = await uploadToSupabase(req.file, "branches");
+    }
 
-    /**
- const branchResult = await client.query(
-      `INSERT INTO branch (name, address, contact, operational_hours, time_slots)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, name, address, contact, created_at`,
+    // ─── 3. Insert branch baru (Termasuk URL Photo) ───────────
+    const branchResult = await client.query(
+      `INSERT INTO branch (name, address, contact, operational_hours, time_slots, photo)
+       VALUES ($1, $2, $3, $4, $5, $6) 
+       RETURNING id, name, address, contact, photo, created_at`,
       [
-        branch_name.trim(),
-        branch_address.trim(),
-        branch_contact.trim(),
-        JSON.stringify(operational_hours || {}),
-        JSON.stringify(
+        branch_name.trim(),                      // $1
+        branch_address.trim(),                   // $2
+        branch_contact.trim(),                   // $3
+        JSON.stringify(operational_hours || {}), // $4
+        JSON.stringify(                          // $5
           Array.isArray(time_slots)
             ? time_slots
             : String(time_slots)
@@ -151,39 +150,16 @@ const createBranch = async (req, res) => {
                 .map((s) => s.trim())
                 .filter(Boolean)
         ),
-        JSON.stringify(["appointment", "class", "facility"]),
+        photoUrl                                 // $6 (Bisa berisi URL atau null)
       ]
     );
- */
- // ─── 2. Insert branch baru ────────────────────────────────
-// Hapus 'services' dari daftar kolom dan hapus parameter terakhir di array
-const branchResult = await client.query(
-  `INSERT INTO branch (name, address, contact, operational_hours, time_slots)
-   VALUES ($1, $2, $3, $4, $5) 
-   RETURNING id, name, address, contact, created_at`,
-  [
-    branch_name.trim(),      // $1
-    branch_address.trim(),   // $2
-    branch_contact.trim(),   // $3
-    JSON.stringify(operational_hours || {}), // $4
-    JSON.stringify(          // $5
-      Array.isArray(time_slots)
-        ? time_slots
-        : String(time_slots)
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean)
-    ),
-    // Parameter ke-6 (JSON.stringify(["appointment", ...])) SUDAH DIHAPUS DI SINI
-  ]
-);
 
     const newBranch = branchResult.rows[0];
 
-    // ─── 3. Hash password admin baru ─────────────────────────
+    // ─── 4. Hash password admin baru ─────────────────────────
     const hashedPassword = await bcrypt.hash(admin_password, 12);
 
-    // ─── 4. Insert admin cabang baru ─────────────────────────
+    // ─── 5. Insert admin cabang baru ─────────────────────────
     const adminResult = await client.query(
       `INSERT INTO admin (email, password, phone, role, branch_id)
        VALUES ($1, $2, $3, $4, $5)
@@ -228,7 +204,6 @@ const branchResult = await client.query(
 /**
  * DELETE /api/branches/:id
  * Hapus cabang beserta admin yang terhubung ke cabang tersebut
- * Admin pusat tidak bisa hapus cabang miliknya sendiri
  */
 const deleteBranch = async (req, res) => {
   const branchId = parseInt(req.params.id);
@@ -268,15 +243,9 @@ const deleteBranch = async (req, res) => {
     const branchName = branchCheck.rows[0].name;
 
     // ─── 2. Hapus semua admin yang terhubung ke cabang ini ────
-    // (karena admin.branch_id ada FK ke branch.id ON DELETE SET NULL,
-    //  kita set null dulu atau hapus admin-nya — pilih hapus admin)
     await client.query(`DELETE FROM admin WHERE branch_id = $1`, [branchId]);
 
-    // ─── 3. Hapus token reset password yang mungkin masih ada ─
-    // (lewat cascade karena FK admin_id ON DELETE CASCADE,
-    //  sudah otomatis terhapus saat admin dihapus)
-
-    // ─── 4. Hapus branch ──────────────────────────────────────
+    // ─── 3. Hapus branch ──────────────────────────────────────
     await client.query(`DELETE FROM branch WHERE id = $1`, [branchId]);
 
     await client.query("COMMIT");

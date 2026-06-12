@@ -1,6 +1,5 @@
 const pool = require("../config/db");
-const fs = require("fs");
-const path = require("path");
+const uploadToSupabase = require("../utils/uploadToSupabase"); // <-- Import helper Supabase
 const { softDeleteSchedulesByCondition } = require("../utils/scheduleCleanup");
 
 const getBranchId = (req, res) => {
@@ -13,14 +12,6 @@ const getBranchId = (req, res) => {
     return null;
   }
   return branchId;
-};
-
-const deleteImageFile = (filename) => {
-  if (!filename) return;
-  const filePath = path.join(process.cwd(), "uploads", "staffs", filename);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
 };
 
 /**
@@ -52,19 +43,16 @@ const getAllStaff = async (req, res) => {
 
 /**
  * POST /api/staff
- * Tambah staff baru
-
+ * Tambah staff baru (Upload gambar langsung ke Supabase Storage)
  */
 const createStaff = async (req, res) => {
   const branchId = getBranchId(req, res);
   if (!branchId) return;
 
   const { name, contact, description } = req.body;
-  const imageFile = req.file || null;
 
   // Validasi field wajib
   if (!name || !name.trim()) {
-    if (imageFile) deleteImageFile(imageFile.filename);
     return res.status(400).json({
       success: false,
       message: "Nama staff wajib diisi",
@@ -72,6 +60,12 @@ const createStaff = async (req, res) => {
   }
 
   try {
+    // Proses Upload Gambar ke Supabase jika file dikirim dari client
+    let imageUrl = null;
+    if (req.file) {
+      imageUrl = await uploadToSupabase(req.file, "staffs");
+    }
+
     const result = await pool.query(
       `INSERT INTO staff (branch_id, name, contact, image, description)
        VALUES ($1, $2, $3, $4, $5)
@@ -80,7 +74,7 @@ const createStaff = async (req, res) => {
         branchId,
         name.trim(),
         contact?.trim() || null,
-        imageFile ? imageFile.filename : null,
+        imageUrl, // Menyimpan URL publik Supabase (atau null jika tidak ada gambar)
         description?.trim() || null,
       ]
     );
@@ -91,8 +85,6 @@ const createStaff = async (req, res) => {
       data: result.rows[0],
     });
   } catch (err) {
-    // Kalau DB error, hapus file yang sudah telanjur diupload
-    if (imageFile) deleteImageFile(imageFile.filename);
     console.error("Create staff error:", err.message);
     return res.status(500).json({ success: false, message: "Server error" });
   }
@@ -101,7 +93,6 @@ const createStaff = async (req, res) => {
 /**
  * PUT /api/staff/:id
  * Edit data staff
- * Kalau ada file baru di-upload, hapus file lama dari disk
  */
 const updateStaff = async (req, res) => {
   const branchId = getBranchId(req, res);
@@ -109,27 +100,23 @@ const updateStaff = async (req, res) => {
 
   const staffId = parseInt(req.params.id);
   const { name, contact, description } = req.body;
-  const imageFile = req.file || null;
 
   if (isNaN(staffId)) {
-    if (imageFile) deleteImageFile(imageFile.filename);
     return res.status(400).json({ success: false, message: "ID tidak valid" });
   }
 
   if (!name || !name.trim()) {
-    if (imageFile) deleteImageFile(imageFile.filename);
     return res.status(400).json({ success: false, message: "Nama staff wajib diisi" });
   }
 
   try {
-    // Ambil data staff saat ini untuk dapat nama file gambar lama
+    // Cek apakah data staff yang dituju memang ada di bawah cabang milik admin terkait
     const current = await pool.query(
       `SELECT image FROM staff WHERE id = $1 AND branch_id = $2`,
       [staffId, branchId]
     );
 
     if (current.rows.length === 0) {
-      if (imageFile) deleteImageFile(imageFile.filename);
       return res.status(404).json({
         success: false,
         message: "Staff tidak ditemukan",
@@ -137,8 +124,16 @@ const updateStaff = async (req, res) => {
     }
 
     const oldImage = current.rows[0].image;
+    let newImage = oldImage;
 
-    const newImage = imageFile ? imageFile.filename : oldImage;
+    // Jika admin mengunggah file baru, simpan file baru ke Supabase
+    if (req.file) {
+      newImage = await uploadToSupabase(req.file, "staffs");
+      
+      // CATATAN TAMBAHAN:
+      // Di arsitektur Serverless Vercel, kita umumnya membiarkan file lama di Supabase Storage
+      // agar response time tetap cepat, namun tautan di database PostgreSQL sudah sukses terperbarui.
+    }
 
     const result = await pool.query(
       `UPDATE staff
@@ -155,18 +150,12 @@ const updateStaff = async (req, res) => {
       ]
     );
 
-    // Hapus file lama dari disk kalau ada file baru yang berhasil disimpan
-    if (imageFile && oldImage) {
-      deleteImageFile(oldImage);
-    }
-
     return res.status(200).json({
       success: true,
       message: "Data staff berhasil diperbarui",
       data: result.rows[0],
     });
   } catch (err) {
-    if (imageFile) deleteImageFile(imageFile.filename);
     console.error("Update staff error:", err.message);
     return res.status(500).json({ success: false, message: "Server error" });
   }
@@ -174,7 +163,7 @@ const updateStaff = async (req, res) => {
 
 /**
  * DELETE /api/staff/:id
- * Hapus staff + hapus file gambarnya dari disk beserta soft-delete jadwal terkait
+ * Hapus staff beserta soft-delete jadwal terkait
  */
 const deleteStaff = async (req, res) => {
   const branchId = getBranchId(req, res);
@@ -187,9 +176,8 @@ const deleteStaff = async (req, res) => {
     try {
       await client.query("BEGIN");
 
-      // Menambahkan `image` agar bisa dihapus file-nya nanti
       const check = await client.query(
-        `SELECT id, name, image FROM staff WHERE id = $1 AND branch_id = $2`,
+        `SELECT id, name FROM staff WHERE id = $1 AND branch_id = $2`,
         [staffId, branchId]
       );
       if (check.rows.length === 0) {
@@ -197,7 +185,7 @@ const deleteStaff = async (req, res) => {
         return res.status(404).json({ success: false, message: "Staff tidak ditemukan" });
       }
 
-      // ← Soft-delete semua schedule yang pakai staff ini
+      // Soft-delete semua schedule yang menggunakan staff ini
       const scheduleIds = await client.query(
         `SELECT DISTINCT schedule_id FROM schedule_staff WHERE staff_id = $1`,
         [staffId]
@@ -206,12 +194,9 @@ const deleteStaff = async (req, res) => {
         await softDeleteSchedulesByCondition(client, "id = $1", [row.schedule_id]);
       }
 
-      // Delete staff (ON DELETE CASCADE otomatis hapus schedule_staff)
+      // Hapus staff dari DB (ON DELETE CASCADE menghapus relasi di schedule_staff secara otomatis)
       await client.query(`DELETE FROM staff WHERE id = $1`, [staffId]);
       await client.query("COMMIT");
-
-      // Hapus file foto
-      if (check.rows[0].image) deleteImageFile(check.rows[0].image);
 
       return res.status(200).json({
         success: true,

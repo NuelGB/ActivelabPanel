@@ -1,15 +1,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
-const fs = require("fs");
-const path = require("path");
-
-// Helper hapus foto dari disk
-const deletePhotoFile = (filename) => {
-  if (!filename) return;
-  const filePath = path.join(process.cwd(), "uploads", "users", filename);
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-};
+const uploadToSupabase = require("../utils/uploadToSupabase"); // <-- Import helper Supabase
 
 // Helper generate JWT user
 const generateToken = (user) => {
@@ -19,7 +11,6 @@ const generateToken = (user) => {
     { expiresIn: process.env.USER_JWT_EXPIRES_IN || "30d" }
   );
 };
-
 
 const register = async (req, res) => {
   const { name, email, password, phone, gender } = req.body;
@@ -88,7 +79,6 @@ const register = async (req, res) => {
   }
 };
 
-
 const login = async (req, res) => {
   const { email, password } = req.body;
 
@@ -145,7 +135,6 @@ const login = async (req, res) => {
   }
 };
 
-
 const getProfile = async (req, res) => {
   try {
     const result = await pool.query(
@@ -164,29 +153,30 @@ const getProfile = async (req, res) => {
   }
 };
 
-
 const updateProfile = async (req, res) => {
   const { name, phone, gender } = req.body;
-  const photoFile = req.file || null;
 
   if (!name || !name.trim()) {
-    if (photoFile) deletePhotoFile(photoFile.filename);
     return res.status(400).json({ success: false, message: "Nama wajib diisi" });
   }
 
   try {
-    // Ambil data lama untuk hapus foto lama jika ada foto baru
+    // Ambil data lama untuk mempertahankan foto lama jika user tidak upload foto baru
     const current = await pool.query(
       "SELECT photo FROM app_user WHERE id = $1",
       [req.user.id]
     );
     if (current.rows.length === 0) {
-      if (photoFile) deletePhotoFile(photoFile.filename);
       return res.status(404).json({ success: false, message: "User tidak ditemukan" });
     }
 
     const oldPhoto = current.rows[0].photo;
-    const newPhoto = photoFile ? photoFile.filename : oldPhoto;
+    let newPhoto = oldPhoto;
+
+    // Jika user mengunggah file foto baru, upload langsung ke Supabase Storage
+    if (req.file) {
+      newPhoto = await uploadToSupabase(req.file, "users");
+    }
 
     const result = await pool.query(
       `UPDATE app_user
@@ -196,23 +186,16 @@ const updateProfile = async (req, res) => {
       [name.trim(), phone?.trim() || null, gender || null, newPhoto, req.user.id]
     );
 
-    // Hapus foto lama dari disk jika ada foto baru
-    if (photoFile && oldPhoto) {
-      deletePhotoFile(oldPhoto);
-    }
-
     return res.status(200).json({
       success: true,
       message: "Profil berhasil diperbarui",
       data: result.rows[0],
     });
   } catch (err) {
-    if (photoFile) deletePhotoFile(photoFile.filename);
     console.error("Update profile error:", err.message);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
-
 
 const deleteAccount = async (req, res) => {
   try {
@@ -224,9 +207,6 @@ const deleteAccount = async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, message: "User tidak ditemukan" });
     }
-
-    // Hapus foto profil dari disk
-    deletePhotoFile(result.rows[0].photo);
 
     return res.status(200).json({
       success: true,
@@ -246,10 +226,10 @@ const getPaymentHistory = async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT
-         pt.id, pt.order_id, pt.amount, pt.payment_type,
-         pt.transaction_type, pt.status, pt.created_at,
-         m.name AS membership_name, m.level,
-         b.name AS branch_name
+          pt.id, pt.order_id, pt.amount, pt.payment_type,
+          pt.transaction_type, pt.status, pt.created_at,
+          m.name AS membership_name, m.level,
+          b.name AS branch_name
        FROM payment_transaction pt
        LEFT JOIN membership m ON pt.membership_id = m.id
        LEFT JOIN branch b     ON pt.branch_id = b.id
@@ -280,6 +260,12 @@ const hidePayment = async (req, res) => {
   }
 };
 
-
-
-module.exports = { register, login, getProfile, updateProfile, deleteAccount, getPaymentHistory, hidePayment, };
+module.exports = {
+  register,
+  login,
+  getProfile,
+  updateProfile,
+  deleteAccount,
+  getPaymentHistory,
+  hidePayment,
+};

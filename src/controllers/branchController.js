@@ -192,6 +192,98 @@ const createBranch = async (req, res) => {
   }
 };
 
+
+/**
+ * PUT /api/branches/:id
+ * Edit data cabang (termasuk upload/update foto cabang)
+ */
+const updateBranch = async (req, res) => {
+  const branchId = parseInt(req.params.id);
+  const {
+    branch_name,
+    branch_address,
+    branch_contact,
+    operational_hours,
+    time_slots,
+  } = req.body;
+
+  if (isNaN(branchId)) {
+    return res.status(400).json({ success: false, message: "ID cabang tidak valid" });
+  }
+
+  // Validasi field wajib
+  if (!branch_name || !branch_address) {
+    return res.status(400).json({
+      success: false,
+      message: "Nama dan Alamat cabang wajib diisi",
+    });
+  }
+
+  try {
+    // 1. Cek apakah cabang ada dan ambil foto lama
+    const current = await pool.query(
+      `SELECT photo FROM branch WHERE id = $1`,
+      [branchId]
+    );
+
+    if (current.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Cabang tidak ditemukan",
+      });
+    }
+
+    let newPhotoUrl = current.rows[0].photo;
+
+    // 2. Jika ada file foto baru yang diupload, proses ke Supabase
+    if (req.file) {
+      const uploadedUrl = await uploadToSupabase(req.file, "branches");
+      if (uploadedUrl) {
+        newPhotoUrl = uploadedUrl;
+      }
+    }
+
+    // 3. Update data cabang di database
+    const parsedTimeSlots = Array.isArray(time_slots)
+      ? time_slots
+      : time_slots ? String(time_slots).split(",").map((s) => s.trim()).filter(Boolean) : [];
+
+    const result = await pool.query(
+      `UPDATE branch
+       SET name = $1, 
+           address = $2, 
+           contact = $3, 
+           operational_hours = $4, 
+           time_slots = $5, 
+           photo = $6,
+           updated_at = NOW()
+       WHERE id = $7
+       RETURNING id, name, address, contact, photo`,
+      [
+        branch_name.trim(),
+        branch_address.trim(),
+        branch_contact ? branch_contact.trim() : null,
+        JSON.stringify(operational_hours || {}),
+        JSON.stringify(parsedTimeSlots),
+        newPhotoUrl, 
+        branchId,
+      ]
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Data cabang berhasil diperbarui",
+      data: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Update branch error:", err.message);
+    return res.status(500).json({
+      success: false,
+      message: "Terjadi kesalahan saat memperbarui cabang.",
+    });
+  }
+};
+
 /**
  * DELETE /api/branches/:id
  * Hapus cabang beserta admin yang terhubung ke cabang tersebut
@@ -256,4 +348,4 @@ const deleteBranch = async (req, res) => {
   }
 };
 
-module.exports = { getAllBranches, createBranch, deleteBranch };
+module.exports = { getAllBranches, createBranch, updateBranch, deleteBranch };

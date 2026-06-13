@@ -13,6 +13,9 @@ const transporter = nodemailer.createTransport({
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD
   },
+  // Paksa koneksi via IPv4 — banyak host (Railway/Render) tidak punya egress
+  // IPv6 ke Gmail, sehingga muncul error ENETUNREACH pada alamat 2607:f8b0:...
+  family: 4,
   // Tambahkan baris di bawah ini untuk menghindari isu SSL/IPv6 di cloud
   tls: {
     rejectUnauthorized: false

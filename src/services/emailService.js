@@ -6,26 +6,27 @@ let transporter = null;
 const getTransporter = () => {
   if (transporter) return transporter;
 
-  // Membuat transporter standard menggunakan Port 465 (SSL)
   transporter = nodemailer.createTransport({
     host: "smtp.gmail.com",
-    port: 465,
-    secure: true, // WAJIB true jika menggunakan port 465
-    family: 4,    // 🌟 KUNCI UTAMA: Memaksa Nodemailer HANYA menggunakan IPv4
+    port: 587,          // 🌟 Ubah kembali ke 587
+    secure: false,      // 🌟 Wajib false jika port 587
+    family: 4,          // 🌟 Tetap paksa IPv4
     auth: {
       user: process.env.GMAIL_USER,
       pass: process.env.GMAIL_APP_PASSWORD,
     },
-    connectionTimeout: 15000, // 15 detik
+    connectionTimeout: 15000,
     greetingTimeout: 15000,
+    tls: {
+      rejectUnauthorized: false // Membantu meloloskan jabat tangan TLS di cloud
+    }
   });
 
-  // Verifikasi koneksi saat pertama kali dipanggil
   transporter.verify((vErr) => {
     if (vErr) {
       console.error("❌ Email transporter error:", vErr.message);
     } else {
-      console.log("✅ Email transporter siap (Port 465 + IPv4):", process.env.GMAIL_USER);
+      console.log("✅ Email transporter siap (Port 587 + IPv4):", process.env.GMAIL_USER);
     }
   });
 

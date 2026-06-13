@@ -2,58 +2,75 @@ const dns = require('dns');
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
-// ─── Transporter: Gmail SMTP (resolve IPv4 manual) ─────────────
-// Banyak host (Railway/Render) tidak punya egress IPv6, tapi DNS resolver
-// mereka tetap mengembalikan record AAAA untuk smtp.gmail.com → ENETUNREACH.
-// Solusinya: resolve A record (IPv4) secara manual via dns.resolve4(),
-// lalu connect langsung ke IP tersebut. tls.servername tetap diisi
-// "smtp.gmail.com" supaya SNI & validasi sertifikat tetap berhasil.
-
 let transporterPromise = null;
 
 const getTransporter = () => {
   if (transporterPromise) return transporterPromise;
 
-  transporterPromise = new Promise((resolve) => {
-    dns.resolve4('smtp.gmail.com', (err, addresses) => {
+  transporterPromise = new Promise((resolve, reject) => {
+    dns.resolve4('smtp.gmail.com', async (err, addresses) => {
       const host = !err && addresses && addresses.length > 0
         ? addresses[0]
-        : 'smtp.gmail.com'; // fallback kalau resolve4 gagal
+        : 'smtp.gmail.com';
 
       if (err) {
-        console.warn("⚠️ Gagal resolve4 smtp.gmail.com, pakai hostname biasa:", err.message);
+        console.warn("⚠️ Gagal resolve4, fallback ke hostname:", err.message);
       } else {
-        console.log("ℹ️ smtp.gmail.com -> diarahkan ke IPv4:", host);
+        console.log("ℹ️ SMTP Gmail pakai IPv4:", host);
       }
 
-      const transporter = nodemailer.createTransport({
-        host: 'smtp.gmail.com', // Coba kembalikan ke hostname asli
-        port: 465,              // GANTI KE 465
-        secure: true,           // WAJIB TRUE untuk port 465
-        family: 4,              // Tetap paksa IPv4
-        auth: {
-          user: process.env.GMAIL_USER,
-          pass: process.env.GMAIL_APP_PASSWORD
-        },
-        connectionTimeout: 15000,
-        greetingTimeout: 15000,
-      });
+      // 🔹 Fungsi buat transporter
+      const createTransporter = (port, secure) => {
+        return nodemailer.createTransport({
+          host: host,
+          port: port,
+          secure: secure,
+          auth: {
+            user: process.env.GMAIL_USER,
+            pass: process.env.GMAIL_APP_PASSWORD
+          },
+          tls: {
+            servername: 'smtp.gmail.com'
+          },
+          connectionTimeout: 15000,
+          greetingTimeout: 15000,
+        });
+      };
 
-      transporter.verify((vErr) => {
-        if (vErr) console.error("❌ Email transporter error:", vErr.message);
-        else console.log("✅ Email transporter siap:", process.env.GMAIL_USER);
-      });
+      try {
+        // 🔥 Coba port 465 dulu
+        let transporter = createTransporter(465, true);
 
-      resolve(transporter);
+        await transporter.verify();
+        console.log("✅ Email transporter ready (port 465)");
+        return resolve(transporter);
+
+      } catch (err465) {
+        console.warn("⚠️ Port 465 gagal, coba 587:", err465.message);
+
+        try {
+          // 🔄 fallback ke 587
+          let transporter = createTransporter(587, false);
+
+          await transporter.verify();
+          console.log("✅ Email transporter ready (port 587)");
+          return resolve(transporter);
+
+        } catch (err587) {
+          console.error("❌ Semua koneksi SMTP gagal:", err587.message);
+          return reject(err587);
+        }
+      }
     });
   });
 
   return transporterPromise;
 };
 
-// ─── Helper: kirim email ───────────────────────────────────────
+// ─── Helper kirim email ─────────────────────────
 const sendMail = async ({ to, subject, html, text }) => {
   const transporter = await getTransporter();
+
   await transporter.sendMail({
     from: `"ActiveLab" <${process.env.GMAIL_USER}>`,
     to,
@@ -63,112 +80,88 @@ const sendMail = async ({ to, subject, html, text }) => {
   });
 };
 
-// ─── Email HTML template helper ───────────────────────────────
+// ─── Template HTML ──────────────────────────────
 const baseTemplate = (content) => `
 <!DOCTYPE html>
 <html lang="id">
-<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width"/></head>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width"/>
+</head>
 <body style="margin:0;padding:0;background:#f4f4f4;font-family:Arial,sans-serif;">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;padding:40px 0;">
   <tr><td align="center">
     <table width="500" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.1);">
       <tr><td style="background:#0d6efd;padding:30px;text-align:center;">
-        <h1 style="color:#fff;margin:0;font-size:24px;letter-spacing:1px;">Activelab</h1>
+        <h1 style="color:#fff;margin:0;font-size:24px;">Activelab</h1>
         <p style="color:#cfe2ff;margin:8px 0 0;font-size:13px;">ActiveLab Management</p>
       </td></tr>
       <tr><td style="padding:36px 40px;">${content}</td></tr>
-      <tr><td style="background:#f8f9fa;padding:20px 40px;border-top:1px solid #dee2e6;text-align:center;">
+      <tr><td style="background:#f8f9fa;padding:20px;text-align:center;">
         <p style="color:#adb5bd;font-size:12px;margin:0;">
           Email otomatis dari Activelab. Jangan balas email ini.<br/>
-          © ${new Date().getFullYear()} Activelab. All rights reserved.
+          © ${new Date().getFullYear()} Activelab
         </p>
       </td></tr>
     </table>
   </td></tr>
 </table>
-</body></html>`;
+</body>
+</html>`;
 
-/**
- * Kirim email reset password — ADMIN
- */
+// ─── ADMIN RESET ───────────────────────────────
 const sendAdminResetPasswordEmail = async (toEmail, resetToken) => {
   const resetUrl = `${process.env.ADMIN_RESET_URL}?token=${resetToken}`;
   const expiresMin = process.env.RESET_TOKEN_EXPIRES_MINUTES || 30;
 
   const content = `
-    <h2 style="color:#212529;font-size:20px;margin:0 0 16px;">Reset Password Admin</h2>
-    <p style="color:#495057;font-size:15px;line-height:1.6;margin:0 0 24px;">
-      Kami menerima permintaan reset password untuk akun admin <strong>${toEmail}</strong>.
-      Klik tombol di bawah untuk membuat password baru.
+    <h2>Reset Password Admin</h2>
+    <p>Permintaan reset password untuk <strong>${toEmail}</strong>.</p>
+    <p>Klik tombol di bawah:</p>
+    <p style="text-align:center;">
+      <a href="${resetUrl}" style="background:#0d6efd;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;">
+        Reset Password
+      </a>
     </p>
-    <table cellpadding="0" cellspacing="0" width="100%">
-      <tr><td align="center" style="padding:8px 0 32px;">
-        <a href="${resetUrl}" style="background:#0d6efd;color:#fff;text-decoration:none;padding:14px 36px;border-radius:6px;font-size:15px;font-weight:bold;display:inline-block;">
-          Reset Password Sekarang
-        </a>
-      </td></tr>
-    </table>
-    <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:14px;margin-bottom:24px;">
-      <p style="color:#856404;font-size:13px;margin:0;">
-        ⏰ Link berlaku <strong>${expiresMin} menit</strong> dan hanya bisa digunakan sekali.
-      </p>
-    </div>
-    <p style="color:#6c757d;font-size:12px;margin:0;">
-      Jika tidak merasa meminta reset, abaikan email ini.
-    </p>
-    <p style="background:#f8f9fa;border:1px solid #dee2e6;border-radius:4px;padding:10px;font-size:11px;color:#0d6efd;word-break:break-all;margin-top:12px;">
-      ${resetUrl}
-    </p>`;
+    <p>Link berlaku ${expiresMin} menit.</p>
+    <p style="font-size:12px;">${resetUrl}</p>
+  `;
 
   await sendMail({
     to: toEmail,
     subject: "Reset Password Admin — Activelab",
     html: baseTemplate(content),
-    text: `Reset password admin: ${resetUrl}`,
+    text: resetUrl,
   });
-  console.log(`✅ Admin reset email terkirim ke ${toEmail}`);
+
+  console.log(`✅ Admin email terkirim ke ${toEmail}`);
 };
 
-/**
- * Kirim email reset password — USER (Flutter)
- */
+// ─── USER RESET ────────────────────────────────
 const sendUserResetPasswordEmail = async (toEmail, userName, resetToken) => {
   const resetUrl = `${process.env.USER_RESET_URL}?token=${resetToken}`;
   const expiresMin = process.env.RESET_TOKEN_EXPIRES_MINUTES || 30;
 
   const content = `
-    <h2 style="color:#212529;font-size:20px;margin:0 0 16px;">Reset Password Akun ActiveLab</h2>
-    <p style="color:#495057;font-size:15px;line-height:1.6;margin:0 0 8px;">
-      Halo <strong>${userName || toEmail}</strong>,
+    <h2>Reset Password</h2>
+    <p>Halo <strong>${userName || toEmail}</strong>,</p>
+    <p>Klik tombol di bawah untuk reset password:</p>
+    <p style="text-align:center;">
+      <a href="${resetUrl}" style="background:#4285F4;color:#fff;padding:12px 24px;text-decoration:none;border-radius:20px;">
+        Reset Password
+      </a>
     </p>
-    <p style="color:#495057;font-size:15px;line-height:1.6;margin:0 0 24px;">
-      Kami menerima permintaan reset password untuk akun ActiveLab Anda.
-      Buka link di bawah melalui browser untuk membuat password baru.
-    </p>
-    <table cellpadding="0" cellspacing="0" width="100%">
-      <tr><td align="center" style="padding:8px 0 32px;">
-        <a href="${resetUrl}" style="background:#4285F4;color:#fff;text-decoration:none;padding:14px 36px;border-radius:30px;font-size:15px;font-weight:bold;display:inline-block;">
-          Reset Password
-        </a>
-      </td></tr>
-    </table>
-    <div style="background:#fff3cd;border:1px solid #ffc107;border-radius:6px;padding:14px;margin-bottom:24px;">
-      <p style="color:#856404;font-size:13px;margin:0;">
-        ⏰ Link berlaku <strong>${expiresMin} menit</strong>. Setelah reset berhasil, login kembali di aplikasi ActiveLab.
-      </p>
-    </div>
-    <p style="color:#6c757d;font-size:12px;margin:0;">
-      Jika tidak merasa meminta reset, abaikan email ini. Password Anda tidak berubah.
-    </p>
-    `;
+    <p>Link berlaku ${expiresMin} menit.</p>
+  `;
 
   await sendMail({
     to: toEmail,
     subject: "Reset Password — Activelab",
     html: baseTemplate(content),
-    text: `Reset password Anda: ${resetUrl}`,
+    text: resetUrl,
   });
-  console.log(`✅ User reset email terkirim ke ${toEmail}`);
+
+  console.log(`✅ User email terkirim ke ${toEmail}`);
 };
 
 module.exports = {

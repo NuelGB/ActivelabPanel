@@ -10,17 +10,18 @@ router.get("/", getProfile);
 
 router.put(
   "/",
-  // Sebelumnya: upload.single("photo")
-  // Sekarang handle 2 field file sekaligus
+  // Mengizinkan upload 2 field file sekaligus
   upload.fields([
-    { name: "photo", maxCount: 1 },         // foto admin
-    { name: "branch_photo", maxCount: 1 },  // foto branch
+    { name: "photo", maxCount: 1 },         // Key untuk foto admin
+    { name: "branch_photo", maxCount: 1 },  // Key untuk foto branch
   ]),
+  // Middleware penangkap error multer jika format/ukuran tidak sesuai
   (err, req, res, next) => {
     if (err) {
+      console.error("Multer Upload Error:", err.message);
       return res.status(400).json({
         success: false,
-        message: err.message || "Upload gagal",
+        message: err.message || "Upload file gagal",
       });
     }
     next();

@@ -6,7 +6,9 @@ const genCode = () => crypto.randomBytes(3).toString("hex").toUpperCase();
 
 const genQrToken = (payload, expiresAt) => {
   const secondsUntilExpiry = Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000);
-  return jwt.sign(payload, process.env.BOOKING_QR_SECRET, { expiresIn: secondsUntilExpiry });
+  // Pastikan minimal 60 detik agar jwt.sign tidak menerima nilai 0/negatif
+  const safeExpiry = secondsUntilExpiry > 0 ? secondsUntilExpiry : 60;
+  return jwt.sign(payload, process.env.BOOKING_QR_SECRET, { expiresIn: safeExpiry });
 };
 
 const createBooking = async (req, res) => {
@@ -17,8 +19,10 @@ const createBooking = async (req, res) => {
     return res.status(400).json({ success: false, message: "schedule_id wajib diisi" });
   }
 
+  const client = await pool.connect();
+
   try {
-    const schedResult = await pool.query(
+    const schedResult = await client.query(
       `SELECT s.*, b.address AS branch_address,
           TO_CHAR(s.date, 'YYYY-MM-DD') AS date_str,
           TO_CHAR(s.start_time, 'HH24:MI') AS start_str,
@@ -34,8 +38,12 @@ const createBooking = async (req, res) => {
     }
 
     const sch = schedResult.rows[0];
-    const schedStart = new Date(`${sch.date_str}T${sch.start_str}:00`);
-    const schedEnd = new Date(`${sch.date_str}T${sch.end_str}:00`);
+
+    // 🌟 PENTING: data date/time di DB disimpan sebagai waktu WIB (UTC+7).
+    // Tambahkan offset "+07:00" secara eksplisit supaya hasil Date object
+    // selalu benar TANPA tergantung pada zona waktu server (Railway dll).
+    const schedStart = new Date(`${sch.date_str}T${sch.start_str}:00+07:00`);
+    const schedEnd = new Date(`${sch.date_str}T${sch.end_str}:00+07:00`);
     const now = new Date();
     const Limittime = new Date(now.getTime() + 1 * 60 * 1000);
 
@@ -46,12 +54,12 @@ const createBooking = async (req, res) => {
       });
     }
 
-    const bookedCount = await pool.query(
+    const bookedCount = await client.query(
       `SELECT COUNT(*) FROM booking WHERE schedule_id = $1 AND status NOT IN ('cancelled')`,
       [schedule_id]
     );
-    
-    const walkinCount = await pool.query(
+
+    const walkinCount = await client.query(
       `SELECT COUNT(*) FROM walkin_booking
        WHERE service_name_id = $1 AND room_name_id = $2
          AND date = $3::date
@@ -59,14 +67,14 @@ const createBooking = async (req, res) => {
          AND hidden_at IS NULL`,
       [sch.service_name_id, sch.room_name_id, sch.date_str, sch.end_str, sch.start_str]
     );
-    
+
     const totalUsed = parseInt(bookedCount.rows[0].count) + parseInt(walkinCount.rows[0].count);
-    
+
     if (totalUsed >= sch.slot) {
       return res.status(400).json({ success: false, message: "Jadwal ini sudah penuh" });
     }
 
-    const membershipCheck = await pool.query(
+    const membershipCheck = await client.query(
       `SELECT um.id FROM user_membership um
        JOIN membership m ON um.membership_id = m.id
        JOIN membership_benefit mb ON mb.membership_id = m.id
@@ -87,7 +95,7 @@ const createBooking = async (req, res) => {
       });
     }
 
-    const conflictCheck = await pool.query(
+    const conflictCheck = await client.query(
       `SELECT b.id FROM booking b
        JOIN schedule s ON b.schedule_id = s.id
        WHERE b.user_id = $1
@@ -106,10 +114,13 @@ const createBooking = async (req, res) => {
       });
     }
 
+    // ─── Mulai transaction HANYA untuk bagian write (INSERT + UPDATE) ───
+    await client.query("BEGIN");
+
     const checkinCode = genCode();
     const checkinQrExpiry = schedEnd;
 
-    const bookingResult = await pool.query(
+    const bookingResult = await client.query(
       `INSERT INTO booking (user_id, schedule_id, branch_id, status, checkin_code, checkin_qr_expires_at)
        VALUES ($1, $2, $3, 'pending', $4, $5)
        RETURNING id`,
@@ -130,10 +141,12 @@ const createBooking = async (req, res) => {
       checkinQrExpiry
     );
 
-    await pool.query(
+    await client.query(
       `UPDATE booking SET checkin_qr_token = $1 WHERE id = $2`,
       [checkinQrToken, bookingId]
     );
+
+    await client.query("COMMIT");
 
     const booking = await _getBookingById(bookingId);
 
@@ -143,8 +156,17 @@ const createBooking = async (req, res) => {
       data: booking,
     });
   } catch (err) {
-    console.error(err.message);
+    // Kalau transaction sudah BEGIN tapi gagal di tengah jalan, ROLLBACK
+    // supaya tidak ada row "pending" yang nyangkut tanpa checkin_qr_token.
+    try {
+      await client.query("ROLLBACK");
+    } catch (_) {
+      /* ignore jika belum BEGIN */
+    }
+    console.error("Create booking error:", err); // log lengkap (termasuk stack)
     return res.status(500).json({ success: false, message: "Server error" });
+  } finally {
+    client.release();
   }
 };
 

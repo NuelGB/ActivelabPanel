@@ -27,17 +27,13 @@ const getTransporter = () => {
       }
 
       const transporter = nodemailer.createTransport({
-        host,                 // IP IPv4 hasil resolve (atau fallback hostname)
-        port: 587,
-        secure: false,
-        family: 4,
+        host: 'smtp.gmail.com', // Coba kembalikan ke hostname asli
+        port: 465,              // GANTI KE 465
+        secure: true,           // WAJIB TRUE untuk port 465
+        family: 4,              // Tetap paksa IPv4
         auth: {
           user: process.env.GMAIL_USER,
           pass: process.env.GMAIL_APP_PASSWORD
-        },
-        tls: {
-          rejectUnauthorized: false,
-          servername: 'smtp.gmail.com', // wajib: cocokkan SNI & cert dengan IP literal
         },
         connectionTimeout: 15000,
         greetingTimeout: 15000,

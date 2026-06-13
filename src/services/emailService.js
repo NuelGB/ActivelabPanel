@@ -1,34 +1,63 @@
 const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');
-
 const nodemailer = require("nodemailer");
 require("dotenv").config();
 
-// ─── Transporter: Gmail SMTP ───────────────────────────────────
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com', // Pakai host eksplisit, jangan hanya "service: 'gmail'"
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD
-  },
-  // Paksa koneksi via IPv4 — banyak host (Railway/Render) tidak punya egress
-  // IPv6 ke Gmail, sehingga muncul error ENETUNREACH pada alamat 2607:f8b0:...
-  family: 4,
-  // Tambahkan baris di bawah ini untuk menghindari isu SSL/IPv6 di cloud
-  tls: {
-    rejectUnauthorized: false
-  }
-});
+// ─── Transporter: Gmail SMTP (resolve IPv4 manual) ─────────────
+// Banyak host (Railway/Render) tidak punya egress IPv6, tapi DNS resolver
+// mereka tetap mengembalikan record AAAA untuk smtp.gmail.com → ENETUNREACH.
+// Solusinya: resolve A record (IPv4) secara manual via dns.resolve4(),
+// lalu connect langsung ke IP tersebut. tls.servername tetap diisi
+// "smtp.gmail.com" supaya SNI & validasi sertifikat tetap berhasil.
 
-transporter.verify((err) => {
-  if (err) console.error("❌ Email transporter error:", err.message);
-  else console.log("✅ Email transporter siap:", process.env.GMAIL_USER);
-});
+let transporterPromise = null;
+
+const getTransporter = () => {
+  if (transporterPromise) return transporterPromise;
+
+  transporterPromise = new Promise((resolve) => {
+    dns.resolve4('smtp.gmail.com', (err, addresses) => {
+      const host = !err && addresses && addresses.length > 0
+        ? addresses[0]
+        : 'smtp.gmail.com'; // fallback kalau resolve4 gagal
+
+      if (err) {
+        console.warn("⚠️ Gagal resolve4 smtp.gmail.com, pakai hostname biasa:", err.message);
+      } else {
+        console.log("ℹ️ smtp.gmail.com -> diarahkan ke IPv4:", host);
+      }
+
+      const transporter = nodemailer.createTransport({
+        host,                 // IP IPv4 hasil resolve (atau fallback hostname)
+        port: 587,
+        secure: false,
+        family: 4,
+        auth: {
+          user: process.env.GMAIL_USER,
+          pass: process.env.GMAIL_APP_PASSWORD
+        },
+        tls: {
+          rejectUnauthorized: false,
+          servername: 'smtp.gmail.com', // wajib: cocokkan SNI & cert dengan IP literal
+        },
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+      });
+
+      transporter.verify((vErr) => {
+        if (vErr) console.error("❌ Email transporter error:", vErr.message);
+        else console.log("✅ Email transporter siap:", process.env.GMAIL_USER);
+      });
+
+      resolve(transporter);
+    });
+  });
+
+  return transporterPromise;
+};
 
 // ─── Helper: kirim email ───────────────────────────────────────
 const sendMail = async ({ to, subject, html, text }) => {
+  const transporter = await getTransporter();
   await transporter.sendMail({
     from: `"ActiveLab" <${process.env.GMAIL_USER}>`,
     to,

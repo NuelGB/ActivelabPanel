@@ -11,6 +11,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cron = require("node-cron");
 const pool = require("./config/db");
+
 const branchRoutes = require("./routes/branchRoutes");
 const authRoutes = require("./routes/authRoutes");
 const profileRoutes = require("./routes/profileRoutes");
@@ -34,10 +35,18 @@ const { createNotification } = require("./controllers/notificationController");
 const app = express();
 const httpServer = http.createServer(app);
 
+// 🌟 PERBAIKAN CORS: Buat daftar semua URL frontend yang diizinkan
+const allowedOrigins = [
+  "http://localhost:3000", // Akses untuk saat Anda coding di komputer sendiri
+  "https://activelab-fitness-recovery-5iid-51apqozrn.vercel.app", // URL Vercel (dari screenshot)
+  process.env.FRONTEND_URL // Jika Anda menambahkan URL Vercel utama di Railway env variable
+].filter(Boolean); // filter(Boolean) mencegah nilai undefined masuk ke dalam array
+
+// 🌟 Terapkan daftar origin ke Socket.io
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    methods: ["GET", "POST"],
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   },
 });
@@ -57,10 +66,21 @@ app.use(
   })
 );
 
+// 🌟 Terapkan daftar origin ke API Express HTTP
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    origin: function (origin, callback) {
+      // Izinkan request yang tidak memiliki origin (misal dari Postman atau Mobile App)
+      if (!origin) return callback(null, true);
+      
+      // Cek apakah origin yang meminta akses ada di dalam daftar allowedOrigins
+      if (allowedOrigins.indexOf(origin) !== -1) {
+        callback(null, true);
+      } else {
+        callback(new Error("Akses diblokir oleh CORS Policy"));
+      }
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   })
@@ -71,6 +91,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
+// --- ROUTES ---
 app.use("/api/auth", authRoutes);
 app.use("/api/branches", branchRoutes);
 app.use("/api/profile", profileRoutes);

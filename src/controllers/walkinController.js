@@ -87,7 +87,7 @@ const createWalkin = async (req, res) => {
 
   // Tidak boleh walk-in untuk waktu yang sudah lewat
   const now = new Date();
-  const reqStart = new Date(`${date}T${start_time}:00`);
+  const reqStart = new Date(`${date}T${start_time}:00+07:00`);
   if (reqStart < now) {
     return res.status(400).json({ success: false, message: "Tidak bisa membuat walk-in untuk waktu yang sudah berlalu" });
   }

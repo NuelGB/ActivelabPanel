@@ -44,6 +44,7 @@ const processScan = async (req, res) => {
 };
 
 // ─── Helper: Proses check-in atau check-out ───────────────────
+// ─── Helper: Proses check-in atau check-out ───────────────────
 async function _processBookingAction(bookingId, scanType, adminId, branchId) {
   const booking = await pool.query(
     `SELECT b.*, s.date, TO_CHAR(s.start_time,'HH24:MI') AS start_str,
@@ -68,8 +69,9 @@ async function _processBookingAction(bookingId, scanType, adminId, branchId) {
       );
     }
 
-    const schedStart = new Date(`${b.date_str}T${b.start_str}:00`);
-    const schedEnd = new Date(`${b.date_str}T${b.end_str}:00`);
+    // 🌟 Tambahkan offset +07:00 (WIB) — data date/time di DB disimpan dalam WIB
+    const schedStart = new Date(`${b.date_str}T${b.start_str}:00+07:00`);
+    const schedEnd = new Date(`${b.date_str}T${b.end_str}:00+07:00`);
 
     if (now < schedStart) throw new Error(`Sesi belum dimulai. Mulai: ${b.start_str}`);
     if (now > schedEnd) throw new Error("Sesi sudah berakhir. Waktu check-in expired.");
@@ -85,7 +87,8 @@ async function _processBookingAction(bookingId, scanType, adminId, branchId) {
       throw new Error(b.status === "pending" ? "User belum check-in" : `Status: ${b.status}`);
     }
 
-    const schedEnd = new Date(`${b.date_str}T${b.end_str}:00`);
+    // 🌟 Tambahkan offset +07:00 (WIB)
+    const schedEnd = new Date(`${b.date_str}T${b.end_str}:00+07:00`);
     const checkoutDeadline = new Date(schedEnd.getTime() + 60 * 60 * 1000);
 
     if (now > checkoutDeadline) throw new Error("Waktu check-out sudah expired (lebih dari 1 jam setelah sesi selesai)");

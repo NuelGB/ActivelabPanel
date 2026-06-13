@@ -299,8 +299,9 @@ const getCheckinCode = async (req, res) => {
     }
     const booking = result.rows[0];
     const now = new Date();
-    const schedStart = new Date(`${booking.date_str}T${booking.start_str}:00`);
-
+    // 🌟 Tambahkan offset +07:00 (WIB) — data date/time di DB disimpan dalam WIB
+    const schedStart = new Date(`${booking.date_str}T${booking.start_str}:00+07:00`);
+ 
     if (now < schedStart) {
       return res.status(400).json({
         success: false,
@@ -310,7 +311,7 @@ const getCheckinCode = async (req, res) => {
     if (now > new Date(booking.checkin_qr_expires_at)) {
       return res.status(400).json({ success: false, message: "Waktu check-in sudah habis" });
     }
-
+ 
     return res.status(200).json({
       success: true,
       data: {
@@ -319,6 +320,7 @@ const getCheckinCode = async (req, res) => {
       },
     });
   } catch (err) {
+    console.error("Get checkin code error:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };
@@ -340,11 +342,12 @@ const getCheckoutCode = async (req, res) => {
       return res.status(404).json({ success: false, message: "Booking belum check-in" });
     }
     const booking = result.rows[0];
-
+ 
     if (!booking.checkout_code) {
       const checkoutCode = genCode();
+      // 🌟 Tambahkan offset +07:00 (WIB) saat menghitung waktu expired checkout
       const checkoutExpiry = new Date(
-        new Date(`${booking.date_str}T${booking.end_str}:00`).getTime() + 60 * 60 * 1000
+        new Date(`${booking.date_str}T${booking.end_str}:00+07:00`).getTime() + 60 * 60 * 1000
       );
       await pool.query(
         `UPDATE booking SET checkout_code = $1, checkout_qr_expires_at = $2 WHERE id = $3`,
@@ -355,11 +358,11 @@ const getCheckoutCode = async (req, res) => {
         data: { checkout_code: checkoutCode, expires_at: checkoutExpiry },
       });
     }
-
+ 
     if (new Date() > new Date(booking.checkout_qr_expires_at)) {
       return res.status(400).json({ success: false, message: "Waktu check-out sudah habis" });
     }
-
+ 
     return res.status(200).json({
       success: true,
       data: {
@@ -368,6 +371,7 @@ const getCheckoutCode = async (req, res) => {
       },
     });
   } catch (err) {
+    console.error("Get checkout code error:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 };

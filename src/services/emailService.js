@@ -1,59 +1,76 @@
-const nodemailer = require("nodemailer");
 const { google } = require("googleapis");
 require("dotenv").config();
 
-const OAuth2 = google.auth.OAuth2;
-
-// Inisialisasi OAuth2 Client menggunakan variabel lingkungan
-const oauth2Client = new OAuth2(
+// ─── OAuth2 Client ───────────────────────────────────────────────
+const oauth2Client = new google.auth.OAuth2(
   process.env.OAUTH_CLIENT_ID,
   process.env.OAUTH_CLIENT_SECRET,
-  "https://developers.google.com/oauthplayground" // Redirect URI yang kita daftarkan
+  "https://developers.google.com/oauthplayground"
 );
 
-// Atur Refresh Token agar Google tahu aplikasi ini berhak memperbarui Access Token otomatis
 oauth2Client.setCredentials({
   refresh_token: process.env.OAUTH_REFRESH_TOKEN,
 });
 
-// ─── Helper: Kirim Email Menggunakan REST API OAuth2 ───────────
+// Gmail API client (panggil lewat HTTPS ke gmail.googleapis.com, BUKAN SMTP)
+const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+
+// ─── Helper: encode pesan ke format Gmail API (base64url) ───────
+const encodeMessage = ({ to, from, subject, html, text }) => {
+  // Pakai boundary multipart sederhana: text + html
+  const boundary = "activelab_boundary_" + Date.now();
+
+  const messageParts = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "",
+    text || "",
+    "",
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    "",
+    html,
+    "",
+    `--${boundary}--`,
+  ];
+
+  const message = messageParts.join("\r\n");
+
+  // Gmail API butuh base64url (bukan base64 biasa)
+  return Buffer.from(message)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+};
+
+// ─── Helper: kirim email via Gmail API ───────────────────────────
 const sendMail = async ({ to, subject, html, text }) => {
   try {
-    // 🌟 Mengambil Access Token baru secara dinamis menggunakan Refresh Token
-    const accessTokenResponse = await oauth2Client.getAccessToken();
-    const accessToken = accessTokenResponse.token;
-
-    if (!accessToken) {
-      throw new Error("Gagal mengenerate Access Token dari Google OAuth2.");
-    }
-
-    // Buat transporter Nodemailer dengan opsi autentikasi OAuth2
-    // Cara ini menggunakan REST API via port 443 (HTTPS), bukan SMTP port standar (587/465)
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        type: "OAuth2",
-        user: process.env.GMAIL_USER,
-        clientId: process.env.OAUTH_CLIENT_ID,
-        clientSecret: process.env.OAUTH_CLIENT_SECRET,
-        refreshToken: process.env.OAUTH_REFRESH_TOKEN,
-        accessToken: accessToken,
-      },
+    const raw = encodeMessage({
+      to,
+      from: `"ActiveLab" <${process.env.GMAIL_USER}>`,
+      subject,
+      html,
+      text,
     });
 
-    const mailOptions = {
-      from: `"ActiveLab" <${process.env.GMAIL_USER}>`,
-      to: to,
-      subject: subject,
-      html: html,
-      text: text,
-    };
+    const result = await gmail.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
 
-    const result = await transporter.sendMail(mailOptions);
-    console.log(`✉️ Email berhasil dikirim via Gmail OAuth2 API. ID: ${result.messageId}`);
+    console.log(`✉️ Email berhasil dikirim via Gmail API. ID: ${result.data.id}`);
     return result;
   } catch (err) {
-    console.error("❌ Gagal mengirim email via Gmail REST API:", err.message);
+    const detail = err.response?.data || err.message;
+    console.error("❌ Gagal mengirim email via Gmail API:", JSON.stringify(detail));
     throw err;
   }
 };

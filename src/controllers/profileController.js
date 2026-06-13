@@ -1,6 +1,5 @@
 const pool = require("../config/db");
-const fs = require("fs");
-const path = require("path");
+const uploadToSupabase = require("../utils/uploadToSupabase");
 
 /**
  * GET /api/profile
@@ -73,7 +72,6 @@ const getProfile = async (req, res) => {
  * PUT /api/profile
  */
 const updateProfile = async (req, res) => {
-  // 🔍 LOG PELACAK: Cek apa saja yang dikirim dari klien/Thunder Client
   console.log("=== MASUK KE UPDATE PROFILE ===");
   console.log("Body Data:", req.body);
   console.log("Files Received:", req.files);
@@ -91,9 +89,14 @@ const updateProfile = async (req, res) => {
   const adminPhotoFile = req.files?.["photo"]?.[0] || null;
   const branchPhotoFile = req.files?.["branch_photo"]?.[0] || null;
 
-  // Beri info di log jika file terdeteksi atau tidak
-  console.log("Admin Photo File terdeteksi:", adminPhotoFile ? adminPhotoFile.filename : "TIDAK ADA");
-  console.log("Branch Photo File terdeteksi:", branchPhotoFile ? branchPhotoFile.filename : "TIDAK ADA");
+  console.log(
+    "Admin Photo File terdeteksi:",
+    adminPhotoFile ? adminPhotoFile.originalname : "TIDAK ADA"
+  );
+  console.log(
+    "Branch Photo File terdeteksi:",
+    branchPhotoFile ? branchPhotoFile.originalname : "TIDAK ADA"
+  );
 
   const client = await pool.connect();
 
@@ -108,8 +111,6 @@ const updateProfile = async (req, res) => {
       );
       if (emailCheck.rows.length > 0) {
         await client.query("ROLLBACK");
-        if (adminPhotoFile && fs.existsSync(adminPhotoFile.path)) fs.unlinkSync(adminPhotoFile.path);
-        if (branchPhotoFile && fs.existsSync(branchPhotoFile.path)) fs.unlinkSync(branchPhotoFile.path);
         return res.status(409).json({
           success: false,
           message: "Email sudah digunakan oleh admin lain",
@@ -117,21 +118,28 @@ const updateProfile = async (req, res) => {
       }
     }
 
-    // 2. Ambil data saat ini untuk kebutuhan hapus file fisik yang lama
+    // 2. Ambil branch_id admin ini
     const currentData = await client.query(
-      `SELECT a.photo AS admin_photo, a.branch_id, b.photo AS branch_photo
-       FROM admin a
-       LEFT JOIN branch b ON a.branch_id = b.id
-       WHERE a.id = $1`,
+      `SELECT a.branch_id FROM admin a WHERE a.id = $1`,
       [req.admin.id]
     );
-    const currentAdminPhoto = currentData.rows[0]?.admin_photo;
-    const currentBranchPhoto = currentData.rows[0]?.branch_photo;
     const branchId = currentData.rows[0]?.branch_id;
 
     console.log("Branch ID dari admin ini:", branchId);
 
-    // 3. Update tabel admin
+    // 3. Upload foto ke Supabase Storage (jika ada) SEBELUM query UPDATE,
+    //    supaya kalau upload gagal, transaksi bisa di-ROLLBACK dengan bersih.
+    let adminPhotoUrl = null;
+    if (adminPhotoFile) {
+      adminPhotoUrl = await uploadToSupabase(adminPhotoFile, "admins");
+    }
+
+    let branchPhotoUrl = null;
+    if (branchPhotoFile) {
+      branchPhotoUrl = await uploadToSupabase(branchPhotoFile, "branches");
+    }
+
+    // 4. Update tabel admin
     const adminUpdates = [];
     const adminValues = [];
     let adminParamCount = 1;
@@ -144,29 +152,23 @@ const updateProfile = async (req, res) => {
       adminUpdates.push(`phone = $${adminParamCount++}`);
       adminValues.push(phone.trim());
     }
-    if (adminPhotoFile) {
+    if (adminPhotoUrl) {
       adminUpdates.push(`photo = $${adminParamCount++}`);
-      adminValues.push(adminPhotoFile.filename);
+      adminValues.push(adminPhotoUrl);
     }
 
     if (adminUpdates.length > 0) {
       adminUpdates.push(`updated_at = NOW()`);
       adminValues.push(req.admin.id);
-      
+
       console.log("Menjalankan UPDATE Admin...");
       await client.query(
         `UPDATE admin SET ${adminUpdates.join(", ")} WHERE id = $${adminParamCount}`,
         adminValues
       );
-
-      // Hapus foto lama jika diganti baru
-      if (adminPhotoFile && currentAdminPhoto) {
-        const oldPath = path.join(process.cwd(), "uploads", "admins", currentAdminPhoto);
-        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-      }
     }
 
-    // 4. Update tabel branch
+    // 5. Update tabel branch
     if (branchId) {
       const branchUpdates = [];
       const branchValues = [];
@@ -186,50 +188,50 @@ const updateProfile = async (req, res) => {
       }
       if (operational_hours) {
         branchUpdates.push(`operational_hours = $${branchParamCount++}`);
-        const parsed = typeof operational_hours === "string" ? JSON.parse(operational_hours) : operational_hours;
+        const parsed =
+          typeof operational_hours === "string"
+            ? JSON.parse(operational_hours)
+            : operational_hours;
         branchValues.push(JSON.stringify(parsed));
       }
       if (time_slots) {
         branchUpdates.push(`time_slots = $${branchParamCount++}`);
         let slotsArray;
         try {
-          slotsArray = typeof time_slots === "string" && time_slots.startsWith("[")
-            ? JSON.parse(time_slots)
-            : time_slots.split(",").map((s) => s.trim()).filter(Boolean);
+          slotsArray =
+            typeof time_slots === "string" && time_slots.startsWith("[")
+              ? JSON.parse(time_slots)
+              : time_slots.split(",").map((s) => s.trim()).filter(Boolean);
         } catch {
           slotsArray = time_slots.split(",").map((s) => s.trim()).filter(Boolean);
         }
         branchValues.push(JSON.stringify(slotsArray));
       }
-      if (branchPhotoFile) {
+      if (branchPhotoUrl) {
         branchUpdates.push(`photo = $${branchParamCount++}`);
-        branchValues.push(branchPhotoFile.filename);
+        branchValues.push(branchPhotoUrl);
       }
 
       if (branchUpdates.length > 0) {
         branchUpdates.push(`updated_at = NOW()`);
         branchValues.push(branchId);
-        
+
         console.log("Menjalankan UPDATE Branch...");
         await client.query(
           `UPDATE branch SET ${branchUpdates.join(", ")} WHERE id = $${branchParamCount}`,
           branchValues
         );
-
-        // Hapus foto lama branch jika diganti baru
-        if (branchPhotoFile && currentBranchPhoto) {
-          const oldPath = path.join(process.cwd(), "uploads", "branches", currentBranchPhoto);
-          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-        }
       }
-    } else if (branchPhotoFile) {
-      console.log("⚠️ PERINGATAN: File branch_photo dikirim, tetapi admin ini tidak terikat ke branch_id manapun!");
+    } else if (branchPhotoUrl) {
+      console.log(
+        "⚠️ PERINGATAN: File branch_photo dikirim, tetapi admin ini tidak terikat ke branch_id manapun!"
+      );
     }
 
     await client.query("COMMIT");
     console.log("=== TRANSAKSI BERHASIL DI-COMMIT ===");
 
-    // 5. Ambil data terbaru untuk dikembalikan ke user
+    // 6. Ambil data terbaru untuk dikembalikan ke user
     const updatedResult = await client.query(
       `SELECT
          a.id, a.email, a.phone, a.role, a.photo AS admin_photo,
@@ -271,9 +273,6 @@ const updateProfile = async (req, res) => {
     await client.query("ROLLBACK");
     console.error("=== TRANSAKSI GAGAL (ROLLBACK) ===");
     console.error("Error Detail:", err.message);
-
-    if (adminPhotoFile && fs.existsSync(adminPhotoFile.path)) fs.unlinkSync(adminPhotoFile.path);
-    if (branchPhotoFile && fs.existsSync(branchPhotoFile.path)) fs.unlinkSync(branchPhotoFile.path);
 
     return res.status(500).json({
       success: false,

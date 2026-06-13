@@ -38,7 +38,8 @@ const httpServer = http.createServer(app);
 // 🌟 PERBAIKAN CORS: Buat daftar semua URL frontend yang diizinkan
 const allowedOrigins = [
   "http://localhost:3000", // Akses untuk saat Anda coding di komputer sendiri
-  "https://activelab-fitness-recovery-5iid-51apqozrn.vercel.app", // URL Vercel (dari screenshot)
+  "https://activelab-fitness-recovery-5iid.vercel.app", // Domain PRODUCTION Vercel (tanpa hash deployment)
+  "https://activelab-fitness-recovery-5iid-51apqozrn.vercel.app", // URL deployment spesifik (opsional, bisa dihapus)
   process.env.FRONTEND_URL // Jika Anda menambahkan URL Vercel utama di Railway env variable
 ].filter(Boolean); // filter(Boolean) mencegah nilai undefined masuk ke dalam array
 
